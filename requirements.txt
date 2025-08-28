@@ -1,0 +1,9 @@
+
+# For Twitter
+tweepy
+
+# For Mastodon
+Mastodon.py
+
+# For Bluesky
+atproto

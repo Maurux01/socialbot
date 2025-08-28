@@ -1,0 +1,11 @@
+
+# Ignore sensitive configuration
+config.json
+
+# Ignore state file
+last_tweet_id.txt
+
+# Python virtual environment
+venv/
+*.pyc
+__pycache__/
