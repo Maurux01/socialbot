@@ -1,1 +1,6 @@
-Mastodon.py
+Mastodon.py>=1.8.0
+python-dotenv>=1.0.0
+pytest>=7.4.0
+pytest-cov>=4.1.0
+black>=23.9.0
+isort>=5.12.0
