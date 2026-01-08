@@ -12,62 +12,133 @@ from datetime import datetime
 from pathlib import Path
 from mastodon import Mastodon
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+"""SocialBot: small Mastodon posting utility.
+
+This module provides a compact, well-logged `SocialBot` class that
+connects to Mastodon, validates configuration (including environment
+overrides), and posts statuses with optional media and visibility.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import sys
+from typing import Optional
+
+from mastodon import Mastodon
+
+CONFIG_FILE = "config.json"
+
 logger = logging.getLogger(__name__)
 
-class ConfigError(Exception):
-    """Raised when there are configuration-related errors."""
-    pass
 
-class PostError(Exception):
-    """Raised when there are errors related to posting content."""
-    pass
+def load_config(path: str = CONFIG_FILE) -> dict:
+    """Load configuration from JSON file and override with environment vars.
+
+    Environment variables `MASTODON_API_BASE_URL` and `MASTODON_ACCESS_TOKEN`
+    will override values from the file when present.
+    """
+    cfg = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except FileNotFoundError:
+        logger.warning("Config file %s not found; falling back to environment variables.", path)
+    except json.JSONDecodeError as e:
+        logger.error("Invalid JSON in %s: %s", path, e)
+        sys.exit(1)
+
+    mastodon_cfg = cfg.get("mastodon", {})
+
+    api_base = os.getenv("MASTODON_API_BASE_URL") or mastodon_cfg.get("api_base_url")
+    access_token = os.getenv("MASTODON_ACCESS_TOKEN") or mastodon_cfg.get("access_token")
+
+    if not api_base or not access_token:
+        logger.error("Mastodon configuration incomplete. Provide api_base_url and access_token via %s or environment.", path)
+        sys.exit(1)
+
+    return {"mastodon": {"api_base_url": api_base, "access_token": access_token}}
+
 
 class SocialBot:
-    """A class to manage social media interactions."""
-    
-    def __init__(self, config_path: str = 'config.json'):
-        """Initialize the SocialBot with configuration.
-        
-        Args:
-            config_path: Path to the configuration file
-        """
-        self.config_path = config_path
-        self.config = self._load_config()
-        self.client = self._connect_to_mastodon()
-        
-    def _load_config(self) -> Dict:
-        """Load and validate configuration from file or environment variables.
-        
-        Returns:
-            Dict: Configuration dictionary
-        
-        Raises:
-            ConfigError: If configuration is invalid or missing
-        """
-        # Try environment variables first
-        if 'MASTODON_ACCESS_TOKEN' in os.environ and 'MASTODON_API_URL' in os.environ:
-            config = {
-                'mastodon': {
-                    'access_token': os.environ['MASTODON_ACCESS_TOKEN'],
-                    'api_base_url': os.environ['MASTODON_API_URL']
-                }
-            }
-            logger.info("Using configuration from environment variables")
-            return config
-            
-        # Fall back to config file
+    """Encapsulates Mastodon client operations."""
+
+    def __init__(self, config: dict) -> None:
+        self.config = config
+        self.client: Optional[Mastodon] = None
+
+    def connect(self) -> None:
+        """Create a Mastodon client and verify credentials."""
+        mast_cfg = self.config["mastodon"]
         try:
-            with open(self.config_path, 'r') as f:
-                config = json.load(f)
-                
-            # Validate configuration
-            if not config.get('mastodon'):
-                raise ConfigError("Missing 'mastodon' configuration section")
+            self.client = Mastodon(
+                access_token=mast_cfg["access_token"], api_base_url=mast_cfg["api_base_url"]
+            )
+            self.client.account_verify_credentials()
+            logger.info("Connected to Mastodon at %s", mast_cfg["api_base_url"])
+        except Exception as exc:  # keep broad to surfacing API/client errors
+            logger.exception("Failed to connect to Mastodon: %s", exc)
+            raise
+
+    def post(self, content: str, visibility: str = "public", media_path: Optional[str] = None) -> None:
+        """Post `content` to Mastodon with optional `media_path` and `visibility`.
+
+        `visibility` can be one of: public, unlisted, private, direct.
+        """
+        if not self.client:
+            raise RuntimeError("Client not connected. Call connect() before posting.")
+
+        media_ids = None
+        if media_path:
+            if not os.path.exists(media_path):
+                logger.error("Media file not found: %s", media_path)
+                raise FileNotFoundError(media_path)
+            try:
+                logger.debug("Uploading media: %s", media_path)
+                media = self.client.media_post(media_path)
+                media_ids = [media["id"]]
+            except Exception as exc:
+                logger.exception("Failed to upload media: %s", exc)
+                raise
+
+        try:
+            logger.info("Posting status (visibility=%s): %s", visibility, content)
+            self.client.status_post(status=content, media_ids=media_ids, visibility=visibility)
+            logger.info("Posted successfully.")
+        except Exception as exc:
+            logger.exception("Failed to post status: %s", exc)
+            raise
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Post a status to Mastodon using SocialBot.")
+    parser.add_argument("message", help="Text content to post")
+    parser.add_argument("--visibility", default="public", help="Visibility: public/unlisted/private/direct")
+    parser.add_argument("--media", help="Path to media file to attach")
+    parser.add_argument("--config", default=CONFIG_FILE, help="Path to config.json file")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO, format="%(levelname)s: %(message)s")
+
+    config = load_config(args.config)
+    bot = SocialBot(config)
+    try:
+        bot.connect()
+        bot.post(args.message, visibility=args.visibility, media_path=args.media)
+    except Exception:
+        logger.error("Operation failed. See logs for details.")
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
             if not config['mastodon'].get('access_token'):
                 raise ConfigError("Missing Mastodon access token")
             if not config['mastodon'].get('api_base_url'):
